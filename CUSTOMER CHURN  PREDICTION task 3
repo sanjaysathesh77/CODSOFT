@@ -1,0 +1,179 @@
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import (classification_report, roc_auc_score, 
+                           precision_recall_curve, auc, confusion_matrix,
+                           accuracy_score, precision_score, recall_score, f1_score)
+from sklearn.utils.class_weight import compute_sample_weight
+import os
+import joblib
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Load the data using raw string or forward slashes
+try:
+    data = pd.read_csv(r'Churn_Modelling.csv')  # Assumes file is in same directory
+except FileNotFoundError:
+    # Alternative path if needed
+    data = pd.read_csv(os.path.join('C:', 'Users', 'admin', 'Documents', 
+                                'intenship codsoft', 'chrun predict', 
+                                'Churn_Modelling.csv'))
+
+# Data preprocessing
+data = data.drop(['RowNumber', 'CustomerId', 'Surname'], axis=1)
+
+# Visualize the target variable
+plt.figure(figsize=(8, 5))
+sns.countplot(x='Exited', data=data)
+plt.title('Churn Distribution (0 = Stayed, 1 = Churned)')
+plt.show()
+
+# Separate features and target
+X = data.drop('Exited', axis=1)
+y = data['Exited']
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+
+# Define preprocessing
+numeric_features = ['CreditScore', 'Age', 'Tenure', 'Balance', 
+                   'NumOfProducts', 'HasCrCard', 'IsActiveMember', 
+                   'EstimatedSalary']
+categorical_features = ['Geography', 'Gender']
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numeric_features),
+        ('cat', OneHotEncoder(drop='first'), categorical_features)])
+
+# Handle class imbalance using class weights
+def get_sample_weights(y):
+    return compute_sample_weight(class_weight='balanced', y=y)
+
+sample_weights = get_sample_weights(y_train)
+
+# Define models with balanced class weights
+models = {
+    'Logistic Regression': LogisticRegression(random_state=42),
+    'Random Forest': RandomForestClassifier(class_weight='balanced', random_state=42),
+    'Gradient Boosting': GradientBoostingClassifier(random_state=42)
+}
+
+# Evaluation function
+def evaluate_model(model, X_test, y_test):
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred))
+    
+    print(f"ROC-AUC Score: {roc_auc_score(y_test, y_proba):.4f}")
+    
+    precision, recall, _ = precision_recall_curve(y_test, y_proba)
+    pr_auc = auc(recall, precision)
+    print(f"Precision-Recall AUC: {pr_auc:.4f}")
+    
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(6, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Not Churned', 'Churned'],
+                yticklabels=['Not Churned', 'Churned'])
+    plt.ylabel('Actual')
+    plt.xlabel('Predicted')
+    plt.title('Confusion Matrix')
+    plt.show()
+    
+    return {
+        'accuracy': accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred),
+        'recall': recall_score(y_test, y_pred),
+        'f1': f1_score(y_test, y_pred),
+        'roc_auc': roc_auc_score(y_test, y_proba),
+        'pr_auc': pr_auc
+    }
+
+# Train and evaluate models
+results = {}
+for name, model in models.items():
+    print(f"\n{'='*50}")
+    print(f"Training {name}")
+    print(f"{'='*50}")
+    
+    pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', model)
+    ])
+    
+    pipeline.fit(X_train, y_train, classifier__sample_weight=sample_weights)
+    results[name] = evaluate_model(pipeline, X_test, y_test)
+
+# Compare models
+results_df = pd.DataFrame(results).T
+print("\nModel Performance Comparison:")
+print(results_df)
+
+# Feature importance for best model
+best_model_name = results_df['roc_auc'].idxmax()
+best_model = models[best_model_name]
+
+if hasattr(best_model, 'feature_importances_'):
+    pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', best_model)
+    ])
+    pipeline.fit(X_train, y_train)
+    
+    # Get feature names
+    cat_encoder = pipeline.named_steps['preprocessor'].named_transformers_['cat']
+    cat_features = cat_encoder.get_feature_names_out(categorical_features)
+    all_features = numeric_features + list(cat_features)
+    
+    # Plot importance
+    importances = best_model.feature_importances_
+    feat_imp = pd.DataFrame({'Feature': all_features, 'Importance': importances})
+    feat_imp = feat_imp.sort_values('Importance', ascending=False)
+    
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x='Importance', y='Feature', data=feat_imp.head(10))
+    plt.title(f'Top 10 Features - {best_model_name}')
+    plt.show()
+
+# Save best model
+best_pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('classifier', best_model)
+])
+best_pipeline.fit(X_train, y_train)
+joblib.dump(best_pipeline, 'best_churn_model.pkl')
+
+# Prediction function
+def predict_churn(customer_data):
+    """Predict churn for new customer data"""
+    if not hasattr(predict_churn, 'model'):
+        predict_churn.model = joblib.load('best_churn_model.pkl')
+    
+    data = customer_data.copy()
+    proba = predict_churn.model.predict_proba(data)[:, 1]
+    prediction = predict_churn.model.predict(data)
+    
+    data['Churn_Probability'] = proba
+    data['Churn_Prediction'] = prediction
+    
+    return data
+
+# Example usage
+print("\nExample predictions:")
+sample_customers = X_test.sample(5, random_state=42)
+print(predict_churn(sample_customers)[['Geography', 'Gender', 'Age', 
+                                     'Balance', 'Churn_Probability', 
+                                     'Churn_Prediction']])
