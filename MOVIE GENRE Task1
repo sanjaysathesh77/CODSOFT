@@ -1,0 +1,242 @@
+import pandas as pd
+import re
+import zipfile
+import os
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.model_selection import train_test_split
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+import joblib
+
+# Download NLTK resources
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+
+class MovieGenreClassifier:
+    def __init__(self):
+        # Initialize with conservative parameters
+        self.tfidf = TfidfVectorizer(
+            max_features=1000,
+            min_df=1,
+            max_df=0.95,
+            ngram_range=(1, 2),
+            token_pattern=r'(?u)\b\w+\b'
+        )
+        self.mlb = MultiLabelBinarizer()
+        self.model = None
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+        self.temp_dir = "temp_data"
+        
+        # Create temp directory if it doesn't exist
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+    def preprocess_text(self, text):
+        """Clean and preprocess text data"""
+        if not isinstance(text, str):
+            return ""
+            
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z\s]', '', text)
+        words = text.split()
+        words = [word for word in words if word not in self.stop_words]
+        words = [self.lemmatizer.lemmatize(word) for word in words]
+        return ' '.join(words)
+
+    def extract_zip(self, zip_path):
+        """Extract zip file to temporary directory"""
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(self.temp_dir)
+            return [os.path.join(self.temp_dir, f) for f in zip_ref.namelist()]
+        except Exception as e:
+            print(f"Error extracting ZIP file: {e}")
+            return []
+
+    def load_data(self, extracted_files):
+        """Load data from extracted files with flexible format support"""
+        data = []
+        
+        for file_path in extracted_files:
+            if not os.path.isfile(file_path):
+                continue
+                
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith(("Train data:", "Test data:", "Source:")):
+                            continue
+                            
+                        # Support multiple delimiters
+                        if ":::" in line:
+                            parts = line.split(":::")
+                        elif "\t" in line:
+                            parts = line.split("\t")
+                        else:
+                            parts = line.split(",")
+                            
+                        parts = [part.strip() for part in parts]
+                        
+                        if len(parts) >= 4:  # Training data
+                            data.append({
+                                'id': parts[0],
+                                'title': parts[1],
+                                'genre': parts[2],
+                                'description': parts[3],
+                                'type': 'train'
+                            })
+                        elif len(parts) >= 3:  # Test data
+                            data.append({
+                                'id': parts[0],
+                                'title': parts[1],
+                                'description': parts[2],
+                                'type': 'test'
+                            })
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
+        
+        if not data:
+            return pd.DataFrame(), pd.DataFrame()
+            
+        df = pd.DataFrame(data)
+        train_df = df[df['type'] == 'train'].drop('type', axis=1)
+        test_df = df[df['type'] == 'test'].drop('type', axis=1)
+        return train_df, test_df
+
+    def train(self, train_df):
+        """Train the genre prediction model with robust error handling"""
+        if len(train_df) < 2:
+            raise ValueError("Need at least 2 training samples")
+            
+        # Preprocess text
+        train_df['processed_desc'] = train_df['description'].apply(self.preprocess_text)
+        
+        # Convert genres to list format
+        train_df['genre_list'] = train_df['genre'].str.split(', ')
+        
+        # Handle empty genres
+        train_df = train_df[train_df['genre_list'].notna()]
+        if len(train_df) < 2:
+            raise ValueError("Not enough valid genre labels after cleaning")
+        
+        # Encode genres
+        try:
+            y = self.mlb.fit_transform(train_df['genre_list'])
+        except Exception as e:
+            raise ValueError(f"Genre encoding failed: {e}")
+        
+        # Adjust TF-IDF for very small datasets
+        if len(train_df) < 10:
+            self.tfidf.max_features = 500
+            self.tfidf.min_df = 1
+            
+        # Create features
+        try:
+            X = self.tfidf.fit_transform(train_df['processed_desc'])
+        except ValueError as e:
+            raise ValueError(f"Feature extraction failed: {e}")
+        
+        # Train model
+        self.model = OneVsRestClassifier(LogisticRegression(max_iter=1000))
+        self.model.fit(X, y)
+        
+        # Evaluate
+        if len(train_df) >= 4:  # Only split if we have enough data
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2)
+            y_pred = self.model.predict(X_val)
+            print("\nValidation Report:")
+            print(classification_report(y_val, y_pred, 
+                                      target_names=self.mlb.classes_,
+                                      zero_division=0))
+        else:
+            print("\nWarning: Not enough data for proper validation")
+            
+        return self.model
+
+    def predict(self, test_df):
+        """Make predictions on new data"""
+        if self.model is None:
+            raise Exception("Model not trained")
+            
+        test_df['processed_desc'] = test_df['description'].apply(self.preprocess_text)
+        X = self.tfidf.transform(test_df['processed_desc'])
+        y_pred = self.model.predict(X)
+        test_df['predicted_genres'] = [
+            ', '.join(genres) for genres in self.mlb.inverse_transform(y_pred)
+        ]
+        return test_df
+
+    def save_model(self, filename):
+        """Save model components"""
+        joblib.dump({
+            'model': self.model,
+            'tfidf': self.tfidf,
+            'mlb': self.mlb
+        }, filename)
+
+    def cleanup(self):
+        """Remove temporary files"""
+        try:
+            for root, dirs, files in os.walk(self.temp_dir, topdown=False):
+                for name in files:
+                    os.remove(os.path.join(root, name))
+                for name in dirs:
+                    os.rmdir(os.path.join(root, name))
+            os.rmdir(self.temp_dir)
+        except:
+            pass
+
+def main():
+    print("Movie Genre Classifier")
+    classifier = MovieGenreClassifier()
+    
+    try:
+        # Use a sample dataset if no ZIP provided
+        zip_path = "movie_data.zip"  # Change this to your path
+        if not os.path.exists(zip_path):
+            print("\nCreating sample dataset...")
+            with open(os.path.join(classifier.temp_dir, "sample.txt"), 'w') as f:
+                f.write("""1:::Inception:::sci-fi, action:::A thief steals secrets from dreams
+2:::Toy Story:::animation, comedy:::A cowboy doll is threatened by new toys
+3:::The Dark Knight:::action, crime:::Batman fights the Joker
+4:::Forrest Gump:::drama, romance:::A man lives extraordinary events
+5:::Pulp Fiction:::crime, drama:::The lives of two mob hitmen:::test
+6:::The Godfather:::crime, drama:::A crime dynasty story:::test""")
+            zip_path = os.path.join(classifier.temp_dir, "sample.zip")
+            with zipfile.ZipFile(zip_path, 'w') as z:
+                z.write(os.path.join(classifier.temp_dir, "sample.txt"), "sample.txt")
+        
+        # Process data
+        files = classifier.extract_zip(zip_path)
+        train_df, test_df = classifier.load_data(files)
+        
+        print(f"\nTraining Samples: {len(train_df)}")
+        print(f"Test Samples: {len(test_df)}")
+        
+        if len(train_df) > 0:
+            classifier.train(train_df)
+            
+            if len(test_df) > 0:
+                results = classifier.predict(test_df)
+                print("\nPredictions:")
+                print(results[['title', 'predicted_genres']])
+                
+                # Save outputs
+                results.to_csv('predictions.csv', index=False)
+                classifier.save_model('genre_classifier.joblib')
+                print("\nSaved predictions.csv and genre_classifier.joblib")
+        
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+    finally:
+        classifier.cleanup()
+        print("\nProcess completed.")
+
+if __name__ == "__main__":
+    main()
