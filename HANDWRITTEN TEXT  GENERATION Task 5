@@ -1,0 +1,78 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+
+# Dummy Dataset (Replace this with your actual dataset)
+class DummyHandwritingDataset(Dataset):
+    def __init__(self):
+        self.data = [torch.randint(0, 13, (10,)) for _ in range(100)]
+        self.labels = [torch.randint(0, 13, (10,)) for _ in range(100)]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
+
+# RNN Model
+class HandwritingRNN(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim):
+        super(HandwritingRNN, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.rnn = nn.RNN(embedding_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x, hidden):
+        x = self.embedding(x)
+        output, hidden = self.rnn(x, hidden)
+        output = self.fc(output.reshape(-1, output.shape[2]))  # Flatten for loss
+        return output, hidden
+
+    def init_hidden(self, batch_size):
+        # RNN hidden state: (num_layers * num_directions, batch, hidden_dim)
+        return torch.zeros(1, batch_size, hidden_dim)
+
+# Training loop
+def train(model, dataloader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0
+
+    for i, (inputs, targets) in enumerate(dataloader):
+        inputs, targets = inputs.to(device), targets.to(device)
+        hidden = model.init_hidden(inputs.size(0)).to(device)
+
+        optimizer.zero_grad()
+        outputs, hidden = model(inputs, hidden)
+        loss = criterion(outputs, targets.view(-1))  # Flatten targets
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        print(f"Batch {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}")
+
+    return total_loss / len(dataloader)
+
+# Main
+if __name__ == "__main__":
+    # Setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    vocab_size = 13
+    embedding_dim = 16
+    hidden_dim = 32
+    output_dim = vocab_size
+    batch_size = 16
+    epochs = 2
+
+    model = HandwritingRNN(vocab_size, embedding_dim, hidden_dim, output_dim).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    dataset = DummyHandwritingDataset()
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        train_loss = train(model, train_loader, criterion, optimizer, device)
+        print(f"Epoch {epoch+1} completed, Avg Loss: {train_loss:.4f}")
