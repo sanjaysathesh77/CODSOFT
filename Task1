@@ -1,0 +1,52 @@
+# Titanic Survival Prediction Project
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+
+# Load dataset
+df = pd.read_csv(r"C:\Users\admin\Downloads\archive (8)\Titanic-Dataset.csv")
+
+
+# Drop unnecessary columns
+df = df.drop(columns=["PassengerId", "Name", "Ticket", "Cabin"])
+
+# Fill missing values
+imputer = SimpleImputer(strategy='most_frequent')
+df[['Age', 'Embarked']] = imputer.fit_transform(df[['Age', 'Embarked']])
+
+# Encode categorical variables
+le_sex = LabelEncoder()
+le_embarked = LabelEncoder()
+df['Sex'] = le_sex.fit_transform(df['Sex'])
+df['Embarked'] = le_embarked.fit_transform(df['Embarked'])
+
+# Define features and target
+X = df.drop("Survived", axis=1)
+y = df["Survived"]
+
+# Split into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Model 1: Logistic Regression
+lr_model = LogisticRegression(max_iter=200)
+lr_model.fit(X_train, y_train)
+lr_preds = lr_model.predict(X_test)
+
+# Model 2: Random Forest
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_model.fit(X_train, y_train)
+rf_preds = rf_model.predict(X_test)
+
+# Evaluation
+print("Logistic Regression:")
+print(classification_report(y_test, lr_preds))
+print("Accuracy:", accuracy_score(y_test, lr_preds))
+print("\nRandom Forest:")
+print(classification_report(y_test, rf_preds))
+print("Accuracy:", accuracy_score(y_test, rf_preds))
